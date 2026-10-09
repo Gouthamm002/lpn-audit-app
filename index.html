@@ -1,0 +1,435 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LPN Audit App</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #f3f5f7;
+      color: #17202a;
+      font-family: Arial, sans-serif;
+    }
+
+    main {
+      max-width: 480px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 16px;
+      box-shadow: 0 3px 14px #00000012;
+    }
+
+    h1 { margin: 0 0 6px; font-size: 25px; }
+    .subtitle { color: #687580; margin-bottom: 20px; }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin: 15px 0 7px;
+    }
+
+    input, textarea, button {
+      width: 100%;
+      padding: 13px;
+      font-size: 16px;
+      border-radius: 9px;
+    }
+
+    input, textarea {
+      border: 1px solid #cbd2d9;
+      background: white;
+    }
+
+    input[readonly] { background: #eef1f4; }
+
+    textarea {
+      min-height: 80px;
+      resize: vertical;
+    }
+
+    button {
+      border: 0;
+      background: #1769e0;
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 14px;
+    }
+
+    button:disabled {
+      background: #9ba8b7;
+      cursor: not-allowed;
+    }
+
+    #reader {
+      width: 100%;
+      margin-top: 14px;
+      overflow: hidden;
+      border-radius: 10px;
+    }
+
+    #message {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 8px;
+      display: none;
+      overflow-wrap: anywhere;
+    }
+
+    .success { background: #e2f7e8; color: #17652e; }
+    .error { background: #fde8e7; color: #a3221b; }
+    .info { background: #e8f1ff; color: #174a91; }
+
+    .quantity-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 12px;
+    }
+
+    .full { grid-column: 1 / -1; }
+
+    .note {
+      font-size: 13px;
+      color: #687580;
+      line-height: 1.5;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+
+<body>
+<main>
+  <h1>LPN Audit</h1>
+  <div class="subtitle">Scan, count and record inventory discrepancies.</div>
+
+  <button id="scanButton" type="button">Start QR Scanner</button>
+  <div id="reader"></div>
+
+  <form id="auditForm">
+    <label for="lpn">LPN</label>
+    <input id="lpn" autocomplete="off" required
+           placeholder="Scan or enter LPN">
+
+    <div class="quantity-grid">
+      <div>
+        <label for="systemQty">System Qty</label>
+        <input id="systemQty" type="number" min="0"
+               step="any" required placeholder="0">
+      </div>
+
+      <div>
+        <label for="physicalQty">Physical Qty</label>
+        <input id="physicalQty" type="number" min="0"
+               step="any" required placeholder="0">
+      </div>
+
+      <div>
+        <label for="badQty">Bad Qty</label>
+        <input id="badQty" type="number" min="0"
+               step="any" value="0" required>
+      </div>
+
+      <div>
+        <label for="shortQty">Short</label>
+        <input id="shortQty" type="number" readonly value="0">
+      </div>
+
+      <div>
+        <label for="excessQty">Excess</label>
+        <input id="excessQty" type="number" readonly value="0">
+      </div>
+
+      <div class="full">
+        <label for="remarks">Remarks</label>
+        <textarea id="remarks" placeholder="No issues found"></textarea>
+      </div>
+    </div>
+
+    <button id="saveButton" type="submit">SAVE AUDIT</button>
+  </form>
+
+  <div id="message" role="status" aria-live="polite"></div>
+
+  <div class="note">
+    Short and Excess are calculated automatically.
+    Remarks are suggested automatically and can be edited.
+  </div>
+</main>
+
+<script>
+  const API_URL =
+    "https://script.google.com/macros/s/AKfycbxaxBKmuG2bfzXtb2SLirP3QbcrOf7e6_1aLk4A-du7M8cXAh4Xse89G6GMoiwtqEBj/exec";
+
+  const lpnInput = document.getElementById("lpn");
+  const systemInput = document.getElementById("systemQty");
+  const physicalInput = document.getElementById("physicalQty");
+  const badInput = document.getElementById("badQty");
+  const shortInput = document.getElementById("shortQty");
+  const excessInput = document.getElementById("excessQty");
+  const remarksInput = document.getElementById("remarks");
+  const saveButton = document.getElementById("saveButton");
+  const scanButton = document.getElementById("scanButton");
+  const messageBox = document.getElementById("message");
+
+  let scanner = null;
+  let scannerRunning = false;
+  let scanLocked = false;
+  let saving = false;
+  let manualRemarks = false;
+
+  function showMessage(text, type) {
+    messageBox.textContent = text;
+    messageBox.className = type;
+    messageBox.style.display = "block";
+  }
+
+  function hideMessage() {
+    messageBox.style.display = "none";
+  }
+
+  function getQty(input) {
+    return Number(input.value);
+  }
+
+  function buildSuggestedRemarks() {
+    const bad = getQty(badInput);
+    const short = getQty(shortInput);
+    const excess = getQty(excessInput);
+    const issues = [];
+
+    if (bad > 0) issues.push(bad + " damaged");
+    if (short > 0) issues.push(short + " short");
+    if (excess > 0) issues.push(excess + " excess");
+
+    return issues.length ? issues.join("; ") : "No issues found";
+  }
+
+  function updateCalculations() {
+    const system = systemInput.value === ""
+      ? null : getQty(systemInput);
+
+    const physical = physicalInput.value === ""
+      ? null : getQty(physicalInput);
+
+    if (system !== null && physical !== null &&
+        Number.isFinite(system) && Number.isFinite(physical)) {
+      shortInput.value = Math.max(system - physical, 0);
+      excessInput.value = Math.max(physical - system, 0);
+    } else {
+      shortInput.value = 0;
+      excessInput.value = 0;
+    }
+
+    if (!manualRemarks) {
+      remarksInput.value = buildSuggestedRemarks();
+    }
+  }
+
+  [systemInput, physicalInput, badInput].forEach(input => {
+    input.addEventListener("input", updateCalculations);
+  });
+
+  remarksInput.addEventListener("input", () => {
+    manualRemarks = true;
+  });
+
+  function resetRemarksMode() {
+    manualRemarks = false;
+    updateCalculations();
+  }
+
+  async function startScanner() {
+    if (scannerRunning || saving) return;
+
+    try {
+      if (!scanner) {
+        scanner = new Html5Qrcode("reader");
+      }
+
+      scanLocked = false;
+      scanButton.disabled = true;
+
+      await scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 240, height: 160 } },
+        async decodedText => {
+          if (scanLocked || saving) return;
+
+          scanLocked = true;
+          lpnInput.value = decodedText.trim();
+
+          try {
+            if (scannerRunning) {
+              await scanner.stop();
+              scannerRunning = false;
+            }
+          } catch (error) {
+            console.warn("Scanner stop:", error);
+          }
+
+          scanButton.disabled = false;
+          systemInput.focus();
+          showMessage("LPN scanned successfully.", "success");
+        },
+        () => {}
+      );
+
+      scannerRunning = true;
+      scanButton.textContent = "Scanner Active";
+      scanButton.disabled = false;
+      hideMessage();
+
+    } catch (error) {
+      scannerRunning = false;
+      scanButton.disabled = false;
+      showMessage(
+        "Could not start camera. Allow camera access and use HTTPS.",
+        "error"
+      );
+    }
+  }
+
+  scanButton.addEventListener("click", startScanner);
+
+  function stopScanner() {
+    if (scanner && scannerRunning) {
+      return scanner.stop().then(() => {
+        scannerRunning = false;
+        scanButton.textContent = "Start QR Scanner";
+      }).catch(() => {
+        scannerRunning = false;
+      });
+    }
+    return Promise.resolve();
+  }
+
+  document.getElementById("auditForm").addEventListener("submit",
+    async event => {
+      event.preventDefault();
+
+      if (saving) return;
+
+      const lpn = lpnInput.value.trim();
+      const system = systemInput.value;
+      const physical = physicalInput.value;
+      const bad = badInput.value;
+
+      if (!lpn || system === "" || physical === "" || bad === "") {
+        showMessage("Enter the LPN and all quantity fields.", "error");
+        return;
+      }
+
+      const systemQty = Number(system);
+      const physicalQty = Number(physical);
+      const badQty = Number(bad);
+
+      if (![systemQty, physicalQty, badQty].every(Number.isFinite) ||
+          systemQty < 0 || physicalQty < 0 || badQty < 0 ||
+          badQty > physicalQty) {
+        showMessage(
+          "Quantities must be valid non-negative numbers, and Bad Qty cannot exceed Physical Qty.",
+          "error"
+        );
+        return;
+      }
+
+      updateCalculations();
+
+      const remarks = remarksInput.value.trim() ||
+        buildSuggestedRemarks();
+
+      const params = new URLSearchParams({
+        action: "save",
+        lpn,
+        systemQty: String(systemQty),
+        physicalQty: String(physicalQty),
+        badQty: String(badQty),
+        remarks
+      });
+
+      saving = true;
+      saveButton.disabled = true;
+      scanButton.disabled = true;
+      showMessage("Saving audit...", "info");
+
+      try {
+        // JSONP lets us read the backend's actual response.
+        const callbackName = "lpnAuditCallback_" +
+          Date.now() + "_" + Math.floor(Math.random() * 100000);
+
+        const result = await new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error("Save timed out. Check the sheet before retrying."));
+          }, 20000);
+
+          function cleanup() {
+            clearTimeout(timeout);
+            delete window[callbackName];
+            script.remove();
+          }
+
+          window[callbackName] = data => {
+            cleanup();
+            resolve(data);
+          };
+
+          script.onerror = () => {
+            cleanup();
+            reject(new Error("Could not connect to the backend."));
+          };
+
+          script.src = API_URL + "?" + params.toString() +
+            "&callback=" + callbackName;
+
+          document.body.appendChild(script);
+        });
+
+        if (!result || result.success !== true) {
+          throw new Error(result?.error || "Backend did not confirm the save.");
+        }
+
+        showMessage("Audit saved successfully for " + lpn + ".", "success");
+
+        await stopScanner();
+
+        lpnInput.value = "";
+        systemInput.value = "";
+        physicalInput.value = "";
+        badInput.value = "0";
+        shortInput.value = "0";
+        excessInput.value = "0";
+        remarksInput.value = "";
+        resetRemarksMode();
+        scanLocked = false;
+
+        scanButton.textContent = "Start QR Scanner";
+        lpnInput.focus();
+
+      } catch (error) {
+        showMessage(
+          error.message +
+          " Do not immediately retry; first check whether the row was saved.",
+          "error"
+        );
+      } finally {
+        saving = false;
+        saveButton.disabled = false;
+        scanButton.disabled = false;
+      }
+    }
+  );
+
+  updateCalculations();
+</script>
+</body>
+</html>
