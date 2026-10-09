@@ -383,10 +383,12 @@
             resolve(data);
           };
 
-          script.onerror = () => {
-            cleanup();
-            reject(new Error("Could not connect to the backend."));
-          };
+script.onerror = () => {
+  cleanup();
+  reject(new Error(
+    "Backend request failed. Check API_URL, deployment access, and browser network errors."
+  ));
+};
 
           script.src = API_URL + "?" + params.toString() +
             "&callback=" + callbackName;
